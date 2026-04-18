@@ -1068,7 +1068,7 @@ class MammotionReportUpdateCoordinator(MammotionBaseUpdateCoordinator[MowingDevi
             LOGGER.debug("device not found")
             return self.data
 
-        await self.async_send_command("get_report_cfg")
+        await self.async_send_and_wait("get_report_cfg", "toapp_report_data")
 
         LOGGER.debug("Updated Mammotion device %s", self.device_name)
         self.update_failures = 0
