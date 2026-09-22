@@ -2,6 +2,7 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.const import EntityCategory
@@ -64,16 +65,13 @@ class MammotionSpinoSelectEntityDescription(SelectEntityDescription):
 
 SPINO_SELECT_ENTITIES: tuple[MammotionSpinoSelectEntityDescription, ...] = (
     MammotionSpinoSelectEntityDescription(
-        key="spino_work_mode",
-        options=[mode.name for mode in SpinoWorkMode],
-        current_fn=lambda spino_data: spino_data.pool_state.work_mode.name,
-        set_fn=lambda coordinator, value: coordinator.async_set_work_mode(
-            SpinoWorkMode[value].value
-        ),
-    ),
-    MammotionSpinoSelectEntityDescription(
         key="spino_wall_material",
-        options=[material.name for material in WallMaterial],
+        # UNKNOWN (-1) is a sentinel for an unreported value, not a user choice.
+        options=[
+            material.name
+            for material in WallMaterial
+            if material is not WallMaterial.UNKNOWN
+        ],
         current_fn=lambda spino_data: spino_data.pool_state.wall_material.name,
         set_fn=lambda coordinator, value: coordinator.async_set_wall_material(
             WallMaterial[value].value
@@ -81,7 +79,12 @@ SPINO_SELECT_ENTITIES: tuple[MammotionSpinoSelectEntityDescription, ...] = (
     ),
     MammotionSpinoSelectEntityDescription(
         key="spino_bottom_type",
-        options=[bottom.name for bottom in PoolBottomType],
+        # UNKNOWN (-1) is a sentinel for an unreported value, not a user choice.
+        options=[
+            bottom.name
+            for bottom in PoolBottomType
+            if bottom is not PoolBottomType.UNKNOWN
+        ],
         current_fn=lambda spino_data: spino_data.pool_state.bottom_type.name,
         set_fn=lambda coordinator, value: coordinator.async_set_bottom_type(
             PoolBottomType[value].value
@@ -116,21 +119,23 @@ ASYNC_SELECT_ENTITIES: tuple[MammotionAsyncConfigSelectEntityDescription, ...] =
             TurningMode[value].value
         ),
     ),
-    MammotionAsyncConfigSelectEntityDescription(
-        key="wildlife_safety",
-        options=[mode.name for mode in WildlifeSafety],
-        get_fn=lambda coordinator: (
-            WildlifeSafety.off.value
-            if coordinator.data.mower_state.animal_protection.status == 0
-            else coordinator.data.mower_state.animal_protection.mode
-        ),
-        set_fn=lambda coordinator, value: coordinator.async_set_wildlife_safety(
-            WildlifeSafety[value].value
-        ),
+)
+
+# Gated per device on DeviceType.supports_wildlife_safety (device family + firmware).
+WILDLIFE_SAFETY_SELECT_ENTITY = MammotionAsyncConfigSelectEntityDescription(
+    key="wildlife_safety",
+    options=[mode.name for mode in WildlifeSafety],
+    get_fn=lambda coordinator: (
+        WildlifeSafety.off.value
+        if coordinator.data.mower_state.animal_protection.status == 0
+        else coordinator.data.mower_state.animal_protection.mode
+    ),
+    set_fn=lambda coordinator, value: coordinator.async_set_wildlife_safety(
+        WildlifeSafety[value].value
     ),
 )
 
-MINI_AND_X_SERIES_CONFIG_SELECT_ENTITIES: tuple[
+BLADE_SPEED_CONFIG_SELECT_ENTITIES: tuple[
     MammotionAsyncConfigSelectEntityDescription, ...
 ] = (
     MammotionAsyncConfigSelectEntityDescription(
@@ -216,6 +221,17 @@ def _device_firmware_version(device_state: object | None) -> str:
 
 
 # Define the setup entry function
+def _set_bypass_mode(
+    options: list[DetectionStrategy],
+    coordinator: MammotionBaseUpdateCoordinator,
+    value: str,
+) -> None:
+    """Store the ultra_wave value the device uses for the chosen label key."""
+    coordinator.operation_settings.ultra_wave = DetectionStrategy.from_option_key(
+        value, options
+    ).value
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: MammotionConfigEntry,
@@ -249,21 +265,32 @@ async def async_setup_entry(
                 )
             )
 
+        if DeviceType.supports_wildlife_safety(
+            mower.device.device_name,
+            _device_firmware_version(mower.reporting_coordinator.data),
+        ):
+            entities.append(
+                MammotionAsyncConfigSelectEntity(
+                    mower.reporting_coordinator, WILDLIFE_SAFETY_SELECT_ENTITY
+                )
+            )
+
+        # Options are the app's label keys, not the protocol member names: the
+        # same value reads differently depending on which list the device has
+        # (value 1 is "Slow touch" beside a 0, and the off position without one).
+        bypass_options = DetectionStrategy.for_device(
+            mower.device.device_name,
+            _device_firmware_version(mower.reporting_coordinator.data),
+        )
         bypass_mode_desc = MammotionConfigSelectEntityDescription(
             key="bypass_mode",
-            options=[
-                s.name
-                for s in DetectionStrategy.for_device(
-                    mower.device.device_name,
-                    _device_firmware_version(mower.reporting_coordinator.data),
-                )
-            ],
-            set_fn=lambda coordinator, value: setattr(
-                coordinator.operation_settings,
-                "ultra_wave",
-                DetectionStrategy[value].value,
+            options=[s.option_key(bypass_options) for s in bypass_options],
+            # The list is bound here, not closed over: the description outlives
+            # this loop iteration and a closure would read the last mower's list.
+            set_fn=partial(_set_bypass_mode, bypass_options),
+            async_set_fn=lambda coordinator: (
+                coordinator.async_change_bypass_if_working()
             ),
-            async_set_fn=lambda coordinator: coordinator.async_modify_plan_if_mowing(),
         )
         entities.append(
             MammotionConfigSelectEntity(mower.reporting_coordinator, bypass_mode_desc)
@@ -284,8 +311,8 @@ async def async_setup_entry(
                     )
                 )
 
-        if DeviceType.is_mini_or_x_series(mower.device.device_name):
-            for entity_description in MINI_AND_X_SERIES_CONFIG_SELECT_ENTITIES:
+        if DeviceType.is_support_blade_speed(mower.device.device_name):
+            for entity_description in BLADE_SPEED_CONFIG_SELECT_ENTITIES:
                 entities.append(
                     MammotionAsyncConfigSelectEntity(
                         mower.reporting_coordinator, entity_description
@@ -295,9 +322,27 @@ async def async_setup_entry(
         async_add_entities(entities)
 
     for spino in entry.runtime_data.spino:
+        # Which cleaning modes exist is a property of the model, so this one is
+        # built per device rather than sitting in the static tuple.  OFF and
+        # UNKNOWN are reported states, not modes a user can start, and
+        # ``for_device`` already leaves them out.
+        work_mode_desc = MammotionSpinoSelectEntityDescription(
+            key="spino_work_mode",
+            options=[
+                mode.name
+                for mode in SpinoWorkMode.for_device(
+                    spino.coordinator.device_name,
+                    spino.coordinator.device.product_key,
+                )
+            ],
+            current_fn=lambda spino_data: spino_data.pool_state.work_mode.name,
+            set_fn=lambda coordinator, value: coordinator.async_set_work_mode(
+                SpinoWorkMode[value].value
+            ),
+        )
         async_add_entities(
             MammotionSpinoSelectEntity(spino.coordinator, entity_description)
-            for entity_description in SPINO_SELECT_ENTITIES
+            for entity_description in (work_mode_desc, *SPINO_SELECT_ENTITIES)
         )
 
 
@@ -423,8 +468,14 @@ class MammotionSpinoSelectEntity(MammotionBaseSpinoEntity, SelectEntity):
 
     @property
     def current_option(self) -> str | None:
-        """Return the currently selected option."""
-        return self.entity_description.current_fn(self.coordinator.data)
+        """Return the currently selected option.
+
+        A docked Spino reports work mode OFF on most heartbeats, so the device
+        regularly reports a value that is not a selectable option; return None
+        rather than an option HA would reject.
+        """
+        current = self.entity_description.current_fn(self.coordinator.data)
+        return current if current in self.entity_description.options else None
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""

@@ -9,8 +9,11 @@
       "no_longer_present": "Naprava ni več prisotna",
       "not_supported": "Naprava ni podprta",
       "reconfigure_successful": "Ponastavitev uspešna",
+      "merged_into_existing_account": "This account already has an entry; the Bluetooth devices were merged into it and this entry was removed.",
       "api_limit_exceeded": "Prekoračena je bila omejitev API-ja. Poskusite znova pozneje.",
-      "account_in_use": "Vaš račun Mammotion je že aktiven v drugi seji. Odjavite se iz aplikacije Mammotion in poskusite znova."
+      "account_in_use": "Vaš račun Mammotion je že aktiven v drugi seji. Odjavite se iz aplikacije Mammotion in poskusite znova.",
+      "reauth_successful": "Ponovna overitev je uspela",
+      "wrong_account": "Ti poverilnici pripadata drugemu računu Mammotion. Ponovno se overite z računom, s katerim je bil ta vnos nastavljen."
     },
     "error": {
       "login_failed": "Prijava ni uspela. Preverite e-poštni naslov in geslo računa ter poskusite znova.",
@@ -20,33 +23,34 @@
     "flow_title": "{name}",
     "step": {
       "bluetooth_confirm": {
-        "description": "Nastavitev {name}",
-        "data": {
-          "stay_connected_bluetooth": "Ohranite bluetooth povezavo"
-        }
+        "description": "Nastavitev {name}"
       },
       "reconfigure": {
         "data": {
-          "use_wifi": "Uporabi Wi-fi",
           "account_name": "E-poštni naslov Mammotion ali številka računa",
           "password": "Geslo Mammotion računa"
         }
       },
       "user": {
         "data": {
-          "address": "Naprava",
-          "stay_connected_bluetooth": "Ohranite bluetooth povezavo"
+          "address": "Naprava"
         },
         "description": "Izberite vašo kosilnico"
       },
       "wifi": {
         "data": {
-          "use_wifi": "Uporabi Wi-fi (obkljukajte in pošljite za uporabo bluetooth)",
           "account_name": "E-poštni naslov Mammotion ali številka računa",
           "password": "Geslo Mammotion računa"
         },
         "title": "Poveži Wi-fi",
-        "description": "Vnesite e-poštni naslov Mammotion računa ali številko računa in geslo"
+        "description": "Vnesite e-poštni naslov Mammotion računa ali številko računa in geslo. Pustite obe polji prazni, če želite uporabljati samo Bluetooth brez računa."
+      },
+      "reauth_confirm": {
+        "title": "Ponovna overitev Mammotion",
+        "description": "Oblak Mammotion je zavrnil shranjene poverilnice za {account}. Vnesite geslo za ponovno prijavo.",
+        "data": {
+          "password": "Geslo računa Mammotion"
+        }
       }
     }
   },
@@ -55,11 +59,11 @@
       "init": {
         "data": {
           "title": "Posodobi nastavitev",
-          "stay_connected_bluetooth": "Ohrani bluetooth povezavo",
           "prefer_ble_over_wifi": "Daj prednost Bluetooth pred Wi-Fi, ko je na voljo",
           "movement_use_wifi": "Pošiljaj ukaze gibanja prek Wi-Fi",
           "mow_path_fetch_enabled": "Omogoči pridobivanje poti košnje (oblak)",
-          "full_map_fetch_enabled": "Omogoči pridobivanje celotnega zemljevida (oblak) — če izklopljeno, se pridobijo samo imena območij"
+          "full_map_fetch_enabled": "Omogoči pridobivanje celotnega zemljevida (oblak) — če izklopljeno, se pridobijo samo imena območij",
+          "notify": "Prikaži trajna obvestila za"
         }
       }
     }
@@ -118,10 +122,10 @@
         "name": "Preostali čas"
       },
       "l1_satellites": {
-        "name": "L1 sateliti (skupaj)"
+        "name": "L1 signal quality"
       },
       "l2_satellites": {
-        "name": "L2 sateliti (skupaj)"
+        "name": "L2 signal quality"
       },
       "positioning_mode": {
         "name": "Položaj RTK postaje"
@@ -201,6 +205,16 @@
           "reported_offline": "Sporočeno brez povezave"
         }
       },
+      "task_area_status": {
+        "name": "Področje naloge {name}",
+        "state": {
+          "NOT_STARTED": "Ni začeto",
+          "WAITING": "Čaka",
+          "MOWING": "Košnja",
+          "COMPLETE": "Dokončano",
+          "ABORTED": "Prekinjeno"
+        }
+      },
       "maintenance_distance": {
         "name": "Skupno opravljena pot"
       },
@@ -253,22 +267,15 @@
           "CON_WIFI": "Wi-Fi"
         }
       },
-      "task_area_status": {
-        "name": "Področje naloge {name}",
-        "state": {
-          "NOT_STARTED": "Ni začeto",
-          "WAITING": "Čaka",
-          "MOWING": "Košnja",
-          "COMPLETE": "Dokončano",
-          "ABORTED": "Prekinjeno"
-        }
+      "spino_battery": {
+        "name": "Baterija"
       },
       "spino_status": {
         "name": "Stanje",
         "state": {
           "UNKNOWN": "Neznano",
           "IDLE": "Pripravljenost",
-          "PREPARE": "Priprava",
+          "PREPARE": "Pripravljenost",
           "WAIT_WATER": "Polnjenje z vodo",
           "WORKING": "Deluje",
           "PAUSE_GO_CHARGE": "Vračanje na polnjenje (zaustavljeno)",
@@ -282,7 +289,7 @@
         "name": "Način čiščenja",
         "state": {
           "UNKNOWN": "Neznano",
-          "RECHARGE": "Ponovno polnjenje",
+          "OFF": "Izklopljeno",
           "AUTO": "Vse",
           "FLOOR": "Dno",
           "WALL": "Stena",
@@ -290,6 +297,66 @@
           "LINE": "Vodna gladina",
           "CUSTOM": "Po meri"
         }
+      },
+      "spino_ble_rssi": {
+        "name": "BLE RSSI"
+      },
+      "spino_wifi_rssi": {
+        "name": "Wifi RSSI"
+      },
+      "spino_error_time": {
+        "name": "Čas zadnje napake"
+      },
+      "spino_error_message": {
+        "name": "Zadnja napaka"
+      },
+      "spino_error_code": {
+        "name": "Zadnja koda napake"
+      },
+      "spino_mqtt_status": {
+        "name": "Stanje MQTT",
+        "state": {
+          "online": "Online",
+          "offline": "Offline"
+        }
+      },
+      "co_view_l1": {
+        "name": "L1 satellites (co-viewing)"
+      },
+      "co_view_l2": {
+        "name": "L2 satellites (co-viewing)"
+      },
+      "pos_level": {
+        "name": "Position level"
+      },
+      "rtk_signal": {
+        "name": "RTK signal quality"
+      },
+      "device_signal": {
+        "name": "Device signal quality",
+        "state": {
+          "0": "Dobro",
+          "1": "Dobro",
+          "2": "Šibko",
+          "3": "Brez"
+        }
+      },
+      "age": {
+        "name": "RTK correction age"
+      },
+      "base_link_status": {
+        "name": "Base link status",
+        "state": {
+          "0": "Dobro",
+          "1": "Šibko",
+          "2": "Šibko",
+          "3": "Brez"
+        }
+      }
+    },
+    "binary_sensor": {
+      "spino_charging": {
+        "name": "Polnjenje"
       }
     },
     "button": {
@@ -304,6 +371,9 @@
       },
       "release_from_dock": {
         "name": "Izvoz"
+      },
+      "start_dropmow": {
+        "name": "Zaženi DropMow"
       },
       "emergency_nudge_forward": {
         "name": "Pomik naprej – za rešitev položaja"
@@ -329,6 +399,15 @@
       "restart_mower": {
         "name": "Ponovni zagon kosilnice"
       },
+      "refresh_status": {
+        "name": "Osveži stanje"
+      },
+      "spino_fetch_map": {
+        "name": "Pridobi zemljevid bazena"
+      },
+      "spino_fetch_line": {
+        "name": "Pridobi pot čiščenja"
+      },
       "spino_refresh_status": {
         "name": "Osveži stanje"
       }
@@ -352,8 +431,14 @@
       "rain_tactics": {
         "name": "Zaznavanje dežja (med košnjo) vkl/izkl"
       },
+      "auto_change_direction": {
+        "name": "Samodejno menjavanje smeri košnje"
+      },
       "rain_detection": {
         "name": "Zaznavanje dežja (kosilnica) vkl/izkl"
+      },
+      "smart_charge": {
+        "name": "Pametno polnjenje"
       },
       "side_led": {
         "name": "Stranska LED osvetlitev"
@@ -379,17 +464,23 @@
       "voice_on_off": {
         "name": "Glas vklopljeno/izklopljeno"
       },
+      "manual_grass_collection": {
+        "name": "Ročno zbiranje trave"
+      },
+      "manual_grass_dump": {
+        "name": "Ročno praznjenje trave"
+      },
       "spino_buzzer": {
-        "name": "Brenčalo"
+        "name": "Zvočni signal"
       },
       "spino_turbo_clean": {
         "name": "Turbo čiščenje"
       },
       "spino_platform_cleaning": {
-        "name": "Čiščenje ploščadi"
+        "name": "Čiščenje platforme"
       },
       "spino_waterline_parking": {
-        "name": "Parkiranje na vodni gladini"
+        "name": "Parkiranje na vodni črti"
       }
     },
     "select": {
@@ -432,10 +523,10 @@
       "bypass_mode": {
         "name": "Zaznavanje ovir",
         "state": {
-          "direct_touch": "Izklopljeno",
-          "slow_touch": "Počasni dotik",
+          "off": "Izklopljeno",
+          "slow_touch": "Osnovno",
           "less_touch": "Manj dotika",
-          "no_touch": "Standard",
+          "standard": "Standardno",
           "sensitive": "Občutljivo"
         }
       },
@@ -461,6 +552,14 @@
           "zero_turn": "Obrat na mestu"
         }
       },
+      "wildlife_safety": {
+        "name": "Varnost divjih živali",
+        "state": {
+          "off": "Izklopljeno",
+          "stop_mowing": "Ustavi košnjo",
+          "low_speed_mowing": "Košnja z nizko hitrostjo"
+        }
+      },
       "cutter_mode": {
         "name": "Hitrost rezanja",
         "state": {
@@ -476,19 +575,11 @@
           "WOMAN": "Ženski"
         }
       },
-      "wildlife_safety": {
-        "name": "Varnost divjih živali",
-        "state": {
-          "off": "Izklopljeno",
-          "stop_mowing": "Ustavi košnjo",
-          "low_speed_mowing": "Košnja z nizko hitrostjo"
-        }
-      },
       "spino_work_mode": {
         "name": "Način čiščenja",
         "state": {
           "UNKNOWN": "Neznano",
-          "RECHARGE": "Ponovno polnjenje",
+          "OFF": "Izklopljeno",
           "AUTO": "Vse",
           "FLOOR": "Dno",
           "WALL": "Stena",
@@ -496,11 +587,32 @@
           "LINE": "Vodna gladina",
           "CUSTOM": "Po meri"
         }
+      },
+      "spino_wall_material": {
+        "name": "Material stene",
+        "state": {
+          "GLASS": "Steklo",
+          "CERAMICS": "Ploščica",
+          "SAND_STONE": "Agregat",
+          "VINYL": "Vinil"
+        }
+      },
+      "spino_bottom_type": {
+        "name": "Oblika dna bazena",
+        "state": {
+          "RIGHT_ANGLE_SIMPLE": "Pravokotno (enostavno)",
+          "RIGHT_ANGLE_COMPLEX": "Pravokotno (zapleteno)",
+          "CURVE_SIMPLE": "Zaobljeno (enostavno)",
+          "CURVE_COMPLEX": "Zaobljeno (zapleteno)"
+        }
       }
     },
     "number": {
       "voice_volume": {
         "name": "Glasnost glasu"
+      },
+      "charge_limit": {
+        "name": "Omejitev polnjenja"
       },
       "start_progress": {
         "name": "Napredek"
@@ -528,10 +640,31 @@
       },
       "map_offset_lon": {
         "name": "Zamik zemljevida dolžina"
+      },
+      "spino_floor_speed": {
+        "name": "Hitrost na dnu bazena"
       }
     },
     "device_tracker": {
       "name": "Sledenje"
+    },
+    "event": {
+      "notification": {
+        "name": "Obvestila",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "device_notification_event": "Obvestilo",
+              "device_information_event": "Informacija",
+              "device_warning_code_event": "Opozorilne kode",
+              "device_warning_event": "Opozorilo",
+              "device_biz_req_event": "Poslovna zahteva",
+              "device_log_progress_event": "Napredek nalaganja dnevnika",
+              "device_config_req_event": "Zahteva za konfiguracijo"
+            }
+          }
+        }
+      }
     }
   },
   "selector": {
@@ -543,10 +676,10 @@
     },
     "ultra_wave": {
       "options": {
-        "0": "Polni dotik",
-        "1": "Počasni dotik",
+        "0": "Izklopljeno",
+        "1": "Osnovno",
         "2": "Manj dotika",
-        "10": "Brez dotika",
+        "10": "Standardno",
         "11": "Občutljivo"
       }
     },
@@ -587,6 +720,12 @@
         "2": "Dva kroga",
         "3": "Trije krogi",
         "4": "Štirje krogi"
+      }
+    },
+    "notify": {
+      "options": {
+        "warnings": "Opozorila in kode napak",
+        "notifications": "Obvestila in informacije naprave"
       }
     }
   },
@@ -730,6 +869,26 @@
     "reset_blade_time": {
       "name": "Ponastavi čas rezila",
       "description": "Ponastavi števec časa uporabe rezila."
+    },
+    "start_dump_point_setup": {
+      "name": "Začni nastavitev točk praznjenja",
+      "description": "Kosilnico preklopi v način nastavitve točk praznjenja trave, da jih je mogoče zabeležiti."
+    },
+    "add_dump_point": {
+      "name": "Dodaj točko praznjenja",
+      "description": "Zabeleži točko praznjenja trave na trenutnem položaju kosilnice."
+    },
+    "undo_dump_point": {
+      "name": "Razveljavi zadnjo točko praznjenja",
+      "description": "Zavrže nazadnje zabeleženo točko praznjenja trave."
+    },
+    "finish_dump_point_setup": {
+      "name": "Končaj nastavitev točk praznjenja",
+      "description": "Shrani zabeležene točke praznjenja in zapusti način nastavitve."
+    },
+    "finish_outside_dump_point": {
+      "name": "Končaj točko praznjenja zunaj območja",
+      "description": "Dokonča nastavitev točke praznjenja, zabeležene zunaj območja košnje."
     },
     "get_map_data": {
       "name": "Pridobi podatke zemljevida",
@@ -1057,6 +1216,10 @@
       "name": "Osveži opravila",
       "description": "Znova pridobi vse urnike iz naprave."
     },
+    "get_tasks": {
+      "name": "Pridobi opravila",
+      "description": "Vrne vse urnike, ki jih integracija hrani za izbrano napravo, vključno s tem, ali je posamezen urnik omogočen. Uporabite za potrditev, da je sprememba obveljala; »Osveži opravila« jih najprej znova prebere z naprave."
+    },
     "start_task": {
       "name": "Zaženi opravilo",
       "description": "Takoj zažene shranjen urnik (znano tudi kot „zaženi urnik“). Samo kosilnica — bazenski robot Spino nima enakovrednega ukaza."
@@ -1098,6 +1261,9 @@
     },
     "start_task_unsupported_on_spino": {
       "message": "Zagon urnika na zahtevo ni podprt na bazenskem robotu Spino — vdelana programska oprema ne ponuja ukaza za takojšen zagon shranjenih urnikov."
+    },
+    "grass_collection_unsupported": {
+      "message": "Ta kosilnica ne podpira zbiranja trave."
     }
   }
 }

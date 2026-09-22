@@ -1,5 +1,7 @@
 """Support for Mammotion switches."""
 
+from __future__ import annotations
+
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from pymammotion.data.model.device import PoolCleanerDevice
+from pymammotion.data.model.enums import CollectorState, DumpState
 from pymammotion.data.model.pool_state import SpinoToggle
 from pymammotion.utility.device_type import DeviceType
 
@@ -26,11 +29,80 @@ from .coordinator import (
     MammotionReportUpdateCoordinator,
     MammotionSpinoCoordinator,
 )
-from .entity import MammotionBaseEntity, MammotionBaseSpinoEntity
+from .entity import (
+    MammotionBaseEntity,
+    MammotionBaseSpinoEntity,
+    device_firmware_version,
+    supports_grass_collection,
+)
 
 # Matches pymammotion's auto-generated fallback names ("area 1", "area 2", …).
 # These carry no user intent and must be treated the same as empty names.
 _PYMAMMOTION_AUTO_NAME = re.compile(r"^area\s+\d+$", re.IGNORECASE)
+
+
+def _area_unique_id(coordinator: MammotionBaseUpdateCoordinator, area: int) -> str:
+    """Registry unique_id for an area switch, matching MammotionBaseEntity."""
+    return f"{coordinator.unique_name}_{area}"
+
+
+def _async_rekey_area_unique_id(
+    registry: er.EntityRegistry, entity_id: str, new_unique_id: str
+) -> bool:
+    """Re-key a registry entry to a new unique_id; no-op when the id is taken."""
+    if registry.async_get_entity_id(SWITCH_DOMAIN, DOMAIN, new_unique_id) is not None:
+        return False
+    registry.async_update_entity(entity_id, new_unique_id=new_unique_id)
+    return True
+
+
+def _stale_area_registry_entries(
+    registry: er.EntityRegistry,
+    coordinator: MammotionReportUpdateCoordinator,
+    known_hashes: set[int],
+) -> list[er.RegistryEntry]:
+    """Return the device's area-switch registry entries left from a previous session.
+
+    A leftover is an entry whose hash is neither reported by the device nor
+    tracked in-memory — after an integration reload or HA restart these must be
+    re-keyed to the device's new hashes instead of duplicate "_2" entities
+    being minted.
+    """
+    prefix = f"{coordinator.unique_name}_"
+    stale = []
+    for reg_entry in list(registry.entities.values()):
+        if (
+            reg_entry.domain != SWITCH_DOMAIN
+            or reg_entry.platform != DOMAIN
+            or reg_entry.translation_key != "area"
+            or not reg_entry.unique_id.startswith(prefix)
+        ):
+            continue
+        suffix = reg_entry.unique_id.removeprefix(prefix)
+        if suffix.lstrip("-").isdigit() and int(suffix) not in known_hashes:
+            stale.append(reg_entry)
+    return stale
+
+
+def _async_rekey_stale_entry_for_area(
+    registry: er.EntityRegistry,
+    stale_entries: list[er.RegistryEntry],
+    coordinator: MammotionReportUpdateCoordinator,
+    area_id: int,
+    area_name: str,
+) -> None:
+    """Re-key a stale registry entry matching the area's name, if one exists.
+
+    original_name is the translated "Area {name}", so match on the suffix.
+    """
+    for reg_entry in stale_entries:
+        reg_name = reg_entry.original_name
+        if reg_name and (reg_name == area_name or reg_name.endswith(f" {area_name}")):
+            _async_rekey_area_unique_id(
+                registry, reg_entry.entity_id, _area_unique_id(coordinator, area_id)
+            )
+            stale_entries.remove(reg_entry)
+            return
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -46,6 +118,7 @@ class MammotionAsyncSwitchEntityDescription(MammotionSwitchEntityDescription):
 
     is_on_func: Callable[[MammotionBaseUpdateCoordinator], bool] | None = None
     set_fn: Callable[[MammotionBaseUpdateCoordinator, bool], Awaitable[None]]
+    available_fn: Callable[[MammotionBaseUpdateCoordinator], bool] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -129,17 +202,42 @@ YUKA_CONFIG_SWITCH_ENTITIES: tuple[MammotionConfigSwitchEntityDescription, ...] 
     ),
 )
 
-MINI_AND_X_SERIES_CONFIG_SWITCH_ENTITIES: tuple[
-    MammotionAsyncSwitchEntityDescription, ...
-] = (
+# Manual sweep/dump, the two toggles the app puts on its manual-control page.
+# Both stay unavailable while the mower reports no collector fitted, matching the
+# app hiding them outright on collector_installation_status == 0.
+GRASS_COLLECTION_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
+    MammotionAsyncSwitchEntityDescription(
+        key="manual_grass_collection",
+        is_on_func=lambda coordinator: (
+            coordinator.grass_collection_state is CollectorState.COLLECTING
+        ),
+        set_fn=lambda coordinator, value: coordinator.async_set_grass_collection(value),
+        available_fn=lambda coordinator: coordinator.grass_collector_installed,
+    ),
+    MammotionAsyncSwitchEntityDescription(
+        key="manual_grass_dump",
+        # Raised and pouring both mean "not stowed".
+        is_on_func=lambda coordinator: (
+            coordinator.grass_dump_state in (DumpState.RAISED, DumpState.POURING)
+        ),
+        set_fn=lambda coordinator, value: coordinator.async_set_grass_dump(value),
+        available_fn=lambda coordinator: coordinator.grass_collector_installed,
+    ),
+)
+
+FILL_LIGHT_CONFIG_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
     MammotionAsyncSwitchEntityDescription(
         key="manual_light",
-        is_on_func=lambda coordinator: coordinator.data.mower_state.lamp_info.manual_light,
+        is_on_func=lambda coordinator: (
+            coordinator.data.mower_state.lamp_info.manual_light
+        ),
         set_fn=lambda coordinator, value: coordinator.async_set_manual_light(value),
     ),
     MammotionAsyncSwitchEntityDescription(
         key="night_light",
-        is_on_func=lambda coordinator: coordinator.data.mower_state.lamp_info.night_light,
+        is_on_func=lambda coordinator: (
+            coordinator.data.mower_state.lamp_info.night_light
+        ),
         set_fn=lambda coordinator, value: coordinator.async_set_night_light(value),
     ),
 )
@@ -156,8 +254,9 @@ AUDIO_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
 SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
     MammotionAsyncSwitchEntityDescription(
         key="side_led",
-        is_on_func=lambda coordinator: coordinator.data.mower_state.side_led.enable
-        == 0,
+        is_on_func=lambda coordinator: (
+            coordinator.data.mower_state.side_led.enable == 0
+        ),
         set_fn=lambda coordinator, value: coordinator.async_set_sidelight(int(value)),
         entity_category=EntityCategory.CONFIG,
     ),
@@ -165,6 +264,18 @@ SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
         key="rain_detection",
         is_on_func=lambda coordinator: coordinator.data.mower_state.rain_detection,
         set_fn=lambda coordinator, value: coordinator.async_set_rain_detection(value),
+        entity_category=EntityCategory.CONFIG,
+    ),
+)
+
+# Gated per device on DeviceType.supports_charge_limit (pool robots and old firmware excluded).
+CHARGE_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
+    MammotionAsyncSwitchEntityDescription(
+        key="smart_charge",
+        is_on_func=lambda coordinator: (
+            coordinator.data.mower_state.charge_settings.smart_charge
+        ),
+        set_fn=lambda coordinator, value: coordinator.async_set_smart_charge(value),
         entity_category=EntityCategory.CONFIG,
     ),
 )
@@ -177,15 +288,23 @@ LUBA_1_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
     ),
 )
 
+
+async def _async_set_scheduled_updates(
+    coordinator: MammotionBaseUpdateCoordinator, value: bool
+) -> None:
+    """Adapt the coordinator's setter, which reports whether the position changed."""
+    await coordinator.set_scheduled_updates(value)
+
+
 UPDATE_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
     MammotionAsyncSwitchEntityDescription(
         key="schedule_updates",
         is_on_func=lambda coordinator: coordinator.data.enabled,
-        set_fn=lambda coordinator, value: coordinator.set_scheduled_updates(value),
+        set_fn=_async_set_scheduled_updates,
     ),
 )
 
-CONNECTIVITY_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
+BLUETOOTH_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
     MammotionAsyncSwitchEntityDescription(
         key="bluetooth_enabled",
         is_on_func=lambda coordinator: coordinator.bluetooth_enabled,
@@ -194,6 +313,9 @@ CONNECTIVITY_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] 
         ),
         entity_category=EntityCategory.CONFIG,
     ),
+)
+
+CLOUD_SWITCH_ENTITIES: tuple[MammotionAsyncSwitchEntityDescription, ...] = (
     MammotionAsyncSwitchEntityDescription(
         key="cloud_enabled",
         is_on_func=lambda coordinator: coordinator.cloud_enabled,
@@ -210,6 +332,46 @@ CONFIG_SWITCH_ENTITIES: tuple[MammotionConfigSwitchEntityDescription, ...] = (
         ),
     ),
 )
+
+AUTO_CHANGE_DIRECTION_CONFIG_SWITCH_ENTITIES: tuple[
+    MammotionConfigSwitchEntityDescription, ...
+] = (
+    MammotionConfigSwitchEntityDescription(
+        key="auto_change_direction",
+        set_fn=lambda coordinator, value: setattr(
+            coordinator.operation_settings, "auto_change_direction", int(value)
+        ),
+    ),
+)
+
+
+def _grass_collection_entities(
+    coordinator: MammotionBaseUpdateCoordinator, device_name: str
+) -> list[MammotionSwitchEntity]:
+    """Manual sweep and dump toggles, for mowers that take a grass collector."""
+    if not supports_grass_collection(device_name):
+        return []
+    return [
+        MammotionSwitchEntity(coordinator, description)
+        for description in GRASS_COLLECTION_SWITCH_ENTITIES
+    ]
+
+
+def _spino_switch_supported(
+    coordinator: MammotionSpinoCoordinator,
+    description: MammotionSpinoSwitchEntityDescription,
+) -> bool:
+    """Whether this pool cleaner has the hardware behind *description*.
+
+    Only the force/turbo module is model-dependent: the app hides that row on
+    the S1 and the SP (``SwimmingPoolTestToolsActivity:251-256``) and shows the
+    rest on every cleaner.
+    """
+    if description.key != "spino_turbo_clean":
+        return True
+    return DeviceType.value_of_str(
+        coordinator.device_name, coordinator.device.product_key
+    ) not in (DeviceType.SWIMMINGPOOL_S1, DeviceType.SWIMMINGPOOL_SP)
 
 
 async def async_setup_entry(
@@ -236,49 +398,78 @@ async def async_setup_entry(
         update_areas()
         coordinator.subscribe_map_updated(update_areas)
 
-        entities = []
-        for entity_description in SWITCH_ENTITIES:
-            entity = MammotionSwitchEntity(coordinator, entity_description)
-            entities.append(entity)
+        device_name = mower.device.device_name
+        entities: list = [
+            MammotionSwitchEntity(coordinator, d) for d in SWITCH_ENTITIES
+        ]
 
-        if DeviceType.is_luba_pro(mower.device.device_name):
-            for entity_description in AUDIO_SWITCH_ENTITIES:
-                entities.append(MammotionSwitchEntity(coordinator, entity_description))
+        if DeviceType.is_luba_pro(device_name):
+            entities.extend(
+                MammotionSwitchEntity(coordinator, d) for d in AUDIO_SWITCH_ENTITIES
+            )
 
-        for entity_description in CONFIG_SWITCH_ENTITIES:
-            config_entity = MammotionConfigSwitchEntity(coordinator, entity_description)
-            entities.append(config_entity)
-
-        for entity_description in UPDATE_SWITCH_ENTITIES:
-            config_entity = MammotionUpdateSwitchEntity(coordinator, entity_description)
-            entities.append(config_entity)
-
-        for entity_description in CONNECTIVITY_SWITCH_ENTITIES:
-            entities.append(MammotionSwitchEntity(coordinator, entity_description))
-
-        if DeviceType.is_yuka(mower.device.device_name) and not DeviceType.is_yuka_mini(
-            mower.device.device_name
+        if DeviceType.supports_charge_limit(
+            device_name, device_firmware_version(coordinator.data)
         ):
-            for entity_description in YUKA_CONFIG_SWITCH_ENTITIES:
-                config_entity = MammotionConfigSwitchEntity(
-                    coordinator, entity_description
-                )
-                entities.append(config_entity)
-        if DeviceType.is_luba1(mower.device.device_name):
-            for entity_description in LUBA_1_SWITCH_ENTITIES:
-                entity = MammotionSwitchEntity(coordinator, entity_description)
-                entities.append(entity)
+            entities.extend(
+                MammotionSwitchEntity(coordinator, d) for d in CHARGE_SWITCH_ENTITIES
+            )
 
-        if DeviceType.is_mini_or_x_series(mower.device.device_name):
-            for entity_description in MINI_AND_X_SERIES_CONFIG_SWITCH_ENTITIES:
-                entity = MammotionSwitchEntity(coordinator, entity_description)
-                entities.append(entity)
+        entities.extend(
+            MammotionConfigSwitchEntity(coordinator, d) for d in CONFIG_SWITCH_ENTITIES
+        )
+
+        if DeviceType.supports_auto_change_direction(
+            device_name, device_firmware_version(coordinator.data)
+        ):
+            entities.extend(
+                MammotionConfigSwitchEntity(coordinator, d)
+                for d in AUTO_CHANGE_DIRECTION_CONFIG_SWITCH_ENTITIES
+            )
+        entities.extend(
+            MammotionUpdateSwitchEntity(coordinator, d) for d in UPDATE_SWITCH_ENTITIES
+        )
+        entities.extend(
+            MammotionSwitchEntity(coordinator, d) for d in BLUETOOTH_SWITCH_ENTITIES
+        )
+        # A mower without a cloud identity (BLE-only) has no cloud to switch.
+        if mower.device.iot_id:
+            entities.extend(
+                MammotionSwitchEntity(coordinator, d) for d in CLOUD_SWITCH_ENTITIES
+            )
+
+        if DeviceType.is_yuka(device_name) and not DeviceType.is_yuka_mini(device_name):
+            entities.extend(
+                MammotionConfigSwitchEntity(coordinator, d)
+                for d in YUKA_CONFIG_SWITCH_ENTITIES
+            )
+
+        entities.extend(_grass_collection_entities(coordinator, device_name))
+
+        if DeviceType.is_luba1(device_name):
+            entities.extend(
+                MammotionSwitchEntity(coordinator, d) for d in LUBA_1_SWITCH_ENTITIES
+            )
+
+        if DeviceType.is_support_fill_light(device_name):
+            # The app hides the night-light row on Yuka MV while keeping the manual
+            # light (CarSettingDrawerFragment: `!isSupportFillLight() || isYukaMV()`).
+            entities.extend(
+                MammotionSwitchEntity(coordinator, d)
+                for d in FILL_LIGHT_CONFIG_SWITCH_ENTITIES
+                if not (
+                    d.key == "night_light"
+                    and DeviceType.value_of_str(device_name).is_yuka_mv()
+                )
+            )
+
         async_add_entities(entities)
 
     for spino in entry.runtime_data.spino:
         async_add_entities(
             MammotionSpinoSwitchEntity(spino.coordinator, entity_description)
             for entity_description in SPINO_SWITCH_ENTITIES
+            if _spino_switch_supported(spino.coordinator, entity_description)
         )
 
 
@@ -302,6 +493,15 @@ class MammotionSwitchEntity(MammotionBaseEntity, SwitchEntity, RestoreEntity):
             self._attr_is_on = entity_description.is_on_func(self.coordinator)
         else:
             self._attr_is_on = False  # Default state
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        if self.entity_description.available_fn is not None:
+            return super().available and self.entity_description.available_fn(
+                self.coordinator
+            )
+        return super().available
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the entity on."""
@@ -364,6 +564,16 @@ class MammotionUpdateSwitchEntity(MammotionBaseEntity, SwitchEntity, RestoreEnti
         self.entity_description = entity_description
         self._attr_translation_key = entity_description.key
         self._attr_is_on = True  # Default state
+
+    @property
+    def available(self) -> bool:
+        """Return True whenever there is state to act on.
+
+        Deliberately not the transport-based check the other entities use: this
+        switch is the only way back from updates-off, so it must never strand
+        itself behind an offline device (issue #889).
+        """
+        return self.coordinator.data is not None
 
     @property
     def is_on(self) -> bool:
@@ -459,9 +669,9 @@ class MammotionConfigAreaSwitchEntity(MammotionBaseEntity, SwitchEntity, Restore
         super().__init__(coordinator, entity_description.key)
         self.coordinator = coordinator
         self.entity_description = entity_description
-        self._area = entity_description.area
-        self._attr_extra_state_attributes = {"hash": self._area}
-        self._attr_is_on = self._area in self.coordinator.operation_settings.areas
+        self.area = entity_description.area
+        self._attr_extra_state_attributes = {"hash": self.area}
+        self._attr_is_on = self.area in self.coordinator.operation_settings.areas
         # Last custom name we pushed to the device, so an unrelated registry
         # update (icon, area assignment, …) doesn't re-send set_area_name.
         self._pushed_name: str | None = None
@@ -473,15 +683,31 @@ class MammotionConfigAreaSwitchEntity(MammotionBaseEntity, SwitchEntity, Restore
             name=new_name,
             translation_placeholders={"name": new_name},
         )
-        self._pushed_name = new_name
+        # Don't overwrite _pushed_name when the user has set their own HA label —
+        # resetting it to a device/auto name would cause a spurious set_area_name
+        # push the next time async_registry_entry_updated fires.
+        registry_entry = getattr(self, "registry_entry", None)
+        if not (registry_entry and registry_entry.name):
+            self._pushed_name = new_name
         if self.hass is not None:
             self.async_write_ha_state()
 
     def update_area(self, new_area_id: int) -> None:
         """Update the area hash when the device reports a new hash for the same named area."""
-        old_area = self._area
-        self._area = new_area_id
+        old_area = self.area
+        self.area = new_area_id
         self._attr_extra_state_attributes = {"hash": new_area_id}
+        # Re-key the unique_id to the new hash, or the next restart mints a
+        # duplicate entity with a "_2" suffixed entity_id.
+        new_unique_id = _area_unique_id(self.coordinator, new_area_id)
+        if (
+            self.hass is None
+            or self.registry_entry is None
+            or _async_rekey_area_unique_id(
+                er.async_get(self.hass), self.registry_entry.entity_id, new_unique_id
+            )
+        ):
+            self._attr_unique_id = new_unique_id
         if old_area in self.coordinator.operation_settings.areas:
             self.coordinator.operation_settings.areas.remove(old_area)
             if new_area_id not in self.coordinator.operation_settings.areas:
@@ -493,13 +719,13 @@ class MammotionConfigAreaSwitchEntity(MammotionBaseEntity, SwitchEntity, Restore
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the entity on."""
         self._attr_is_on = True
-        self.entity_description.set_fn(self.coordinator, True, self._area)
+        self.entity_description.set_fn(self.coordinator, True, self.area)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the entity off."""
         self._attr_is_on = False
-        self.entity_description.set_fn(self.coordinator, False, self._area)
+        self.entity_description.set_fn(self.coordinator, False, self.area)
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
@@ -525,18 +751,18 @@ class MammotionConfigAreaSwitchEntity(MammotionBaseEntity, SwitchEntity, Restore
                     return
                 self._pushed_name = new_name
                 self.hass.async_create_task(
-                    self.coordinator.async_set_area_name(self._area, new_name)
+                    self.coordinator.async_set_area_name(self.area, new_name)
                 )
 
     async def async_update(self) -> None:
         """Update the entity state."""
-        self._attr_is_on = self._area in self.coordinator.operation_settings.areas
+        self._attr_is_on = self.area in self.coordinator.operation_settings.areas
         area_keys: set[int] = {
             int(k)
-            for k in self.coordinator.data.map.area.keys()
+            for k in self.coordinator.data.map.area
             if str(k).lstrip("-").isdigit()
         }
-        if self._area not in area_keys:
+        if self.area not in area_keys:
             await self.async_remove()
             return
         self.async_write_ha_state()
@@ -562,19 +788,21 @@ def async_add_area_entities(
     computed = coordinator.data.map.computed_areas
     all_current_areas = {a.hash for a in computed}
     map_area_hashes: set[int] = {
-        int(k) for k in coordinator.data.map.area.keys() if str(k).lstrip("-").isdigit()
+        int(k) for k in coordinator.data.map.area if str(k).lstrip("-").isdigit()
     }
 
     # Trigger re-fetch when the device hasn't yet sent names for all areas.
-    # Luba 1 never provides area_name, so skip for it.
+    # Luba 1 / Yuka never provides area_name, so skip for it.
     if not DeviceType.is_luba1(coordinator.device_name):
         area_name_hashes: set[int] = {a.hash for a in coordinator.data.map.area_name}
         if map_area_hashes - area_name_hashes:
             coordinator.hass.async_create_task(coordinator.async_get_area_list())
 
-    # Startup registry cleanup: remove stale entries from previous sessions.
-    if map_area_hashes and (all_current_areas - added_areas):
-        _async_clean_stale_area_registry_entries(coordinator, all_current_areas)
+    # Early exit when neither the set of area hashes nor any name has changed.
+    if all_current_areas == added_areas:
+        entities_by_area = {e.area: n for n, e in area_entities_by_name.items()}
+        if all(entities_by_area.get(a.hash) == a.name for a in computed):
+            return
 
     # Pre-clear auto-generated names for areas about to be removed so that
     # surviving areas can be renumbered into the freed slots without collision.
@@ -583,7 +811,7 @@ def async_add_area_entities(
             for n in [
                 n
                 for n, e in list(area_entities_by_name.items())
-                if e._area == old_hash and _PYMAMMOTION_AUTO_NAME.match(n)
+                if e.area == old_hash and _PYMAMMOTION_AUTO_NAME.match(n)
             ]:
                 del area_entities_by_name[n]
 
@@ -597,8 +825,13 @@ def async_add_area_entities(
             coord.operation_settings.areas.remove(value)
 
     entities_by_hash: dict[int, tuple[str, MammotionConfigAreaSwitchEntity]] = {
-        e._area: (name, e) for name, e in area_entities_by_name.items()
+        e.area: (name, e) for name, e in area_entities_by_name.items()
     }
+
+    registry = er.async_get(coordinator.hass)
+    stale_registry_entries = _stale_area_registry_entries(
+        registry, coordinator, added_areas | all_current_areas
+    )
 
     for entry in computed:
         area_id = entry.hash
@@ -626,12 +859,17 @@ def async_add_area_entities(
             and new_name in area_entities_by_name
         ):
             existing = area_entities_by_name[new_name]
-            added_areas.discard(existing._area)
+            added_areas.discard(existing.area)
             existing.update_area(area_id)
             added_areas.add(area_id)
             continue
 
-        # Missing area — add a new entity with the name supplied by computed_areas.
+        # Missing area — re-key a stale registry entry with a matching name so
+        # the previous session's entity_id and customisations are reused, then
+        # add a new entity with the name supplied by computed_areas.
+        _async_rekey_stale_entry_for_area(
+            registry, stale_registry_entries, coordinator, area_id, new_name
+        )
         base_area_switch_entity = MammotionConfigAreaSwitchEntityDescription(
             key=f"{area_id}",
             translation_key="area",
@@ -650,11 +888,11 @@ def async_add_area_entities(
     if map_area_hashes:
         old_areas = added_areas - all_current_areas
         if old_areas:
-            async_remove_entities(coordinator, old_areas)
+            async_remove_stale_area_entities(coordinator, old_areas)
             for area in old_areas:
                 added_areas.discard(area)
                 for n in [
-                    n for n, e in list(area_entities_by_name.items()) if e._area == area
+                    n for n, e in list(area_entities_by_name.items()) if e.area == area
                 ]:
                     del area_entities_by_name[n]
 
@@ -662,33 +900,7 @@ def async_add_area_entities(
         async_add_entities(switch_entities)
 
 
-def _async_clean_stale_area_registry_entries(
-    coordinator: MammotionReportUpdateCoordinator,
-    all_current_areas: set[int],
-) -> None:
-    """Remove area entity registry entries whose hashes are no longer on the device.
-
-    Area entity unique_ids follow ``{unique_name}_{hash}`` where the suffix is
-    the numeric area hash.  Any entry whose hash is absent from
-    ``all_current_areas`` is removed so it cannot appear as a ghost duplicate
-    alongside the replacement entity.
-    """
-    registry = er.async_get(coordinator.hass)
-    prefix = f"{coordinator.unique_name}_"
-
-    for entry in list(registry.entities.values()):
-        if entry.domain != SWITCH_DOMAIN or entry.platform != DOMAIN:
-            continue
-        if not entry.unique_id.startswith(prefix):
-            continue
-        suffix = entry.unique_id[len(prefix) :]
-        if not suffix.lstrip("-").isdigit():
-            continue  # non-numeric suffix → not an area entity (e.g. "is_mow")
-        if int(suffix) not in all_current_areas:
-            registry.async_remove(entry.entity_id)
-
-
-def async_remove_entities(
+def async_remove_stale_area_entities(
     coordinator: MammotionBaseUpdateCoordinator,
     old_areas: set[int],
 ) -> None:
@@ -697,7 +909,7 @@ def async_remove_entities(
 
     for area in old_areas:
         entity_id = registry.async_get_entity_id(
-            SWITCH_DOMAIN, DOMAIN, f"{coordinator.unique_name}_{area}"
+            SWITCH_DOMAIN, DOMAIN, _area_unique_id(coordinator, area)
         )
         if entity_id:
             registry.async_remove(entity_id)

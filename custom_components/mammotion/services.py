@@ -13,6 +13,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from pymammotion.data.model.hash_list import CommDataCouple, Plan
 from pymammotion.data.model.pool_state import PoolPlan
+from pymammotion.utility.device_type import DeviceType
 
 from .const import DOMAIN, LOGGER
 from .coordinator import MammotionReportUpdateCoordinator, MammotionSpinoCoordinator
@@ -42,6 +43,10 @@ SERVICE_SET_TASK_ENABLED = "set_task_enabled"
 SERVICE_DELETE_TASK = "delete_task"
 SERVICE_COPY_TASK = "copy_task"
 SERVICE_REFRESH_TASKS = "refresh_tasks"
+# Read the schedules back.  ``refresh_tasks`` re-syncs them from the device;
+# this returns what the integration now holds, so a script can confirm a
+# ``set_task_enabled`` actually landed (issue #890).
+SERVICE_GET_TASKS = "get_tasks"
 # "start task" === "start schedule" — runs a stored mower schedule now.
 # Backed by ``NavPlanTaskExecute(sub_cmd=1, id=plan_id)`` on the wire (see
 # APK ``MACommandHelper.singleSchedule`` / docs/tasks_and_schedules.md § 1.6).
@@ -152,6 +157,10 @@ REFRESH_TASKS_SCHEMA = vol.Schema(
 )
 
 START_TASK_SCHEMA = vol.Schema(
+    {vol.Required(ATTR_ENTITY_ID): _single_entity_id}, extra=vol.ALLOW_EXTRA
+)
+
+GET_TASKS_SCHEMA = vol.Schema(
     {vol.Required(ATTR_ENTITY_ID): _single_entity_id}, extra=vol.ALLOW_EXTRA
 )
 
@@ -336,6 +345,51 @@ def _resolve_device(
     return None
 
 
+def _mower_task_info(plan: Plan) -> dict[str, Any]:
+    """Describe a mower schedule for the get_tasks response.
+
+    ``task_id`` matches the task button's attribute of the same name, so a
+    script can line a response row up with the entity it came from.
+    """
+    return {
+        "task_id": plan.plan_id,
+        "name": plan.task_name,
+        "enabled": plan.is_enabled(),
+        "start_time": plan.start_time,
+        "end_time": plan.end_time,
+        "weeks": list(plan.weeks),
+        "start_date": plan.start_date,
+        "end_date": plan.end_date,
+        "trigger_type": plan.trigger_type,
+        "day": plan.day,
+        "knife_height": plan.knife_height,
+        "speed": plan.speed,
+        "edge_mode": plan.edge_mode,
+        "route_angle": plan.route_angle,
+        "route_spacing": plan.route_spacing,
+        "zone_hashs": list(plan.zone_hashs),
+    }
+
+
+def _spino_task_info(plan: PoolPlan) -> dict[str, Any]:
+    """Describe a Spino schedule for the get_tasks response."""
+    return {
+        "task_id": str(plan.jobid),
+        "name": plan.jobname,
+        "enabled": plan.enabled,
+        "start_time": plan.starttime,
+        "weeks": list(plan.weeks),
+        "start_date": plan.startdate,
+        "end_date": plan.enddate,
+        "trigger_type": plan.triggertype,
+        "day": plan.day,
+        "work_mode": plan.work_mode,
+        "sub_mode": list(plan.sub_mode),
+        "speed": plan.speed,
+        "operating_power": plan.operating_power,
+    }
+
+
 def _raise_task_not_found(entity_id: str) -> None:
     """Raise a translated HomeAssistantError when no task matches."""
     raise HomeAssistantError(
@@ -436,10 +490,14 @@ def async_setup_services(hass: HomeAssistant) -> None:  # noqa: C901
             LOGGER.error("Could not find entity %s", call.data[ATTR_ENTITY_ID])
             return {}
         coordinator = mower.reporting_coordinator
+        device_type = DeviceType.value_of_str(coordinator.device_name)
+        firmware = coordinator.data.device_firmwares.main_controller
+        if device_type.is_support_dynamics_line(firmware):
+            geojson = coordinator.data.map.generated_dynamics_line_geojson
+        else:
+            geojson = coordinator.data.map.generated_mow_progress_geojson
         return apply_geojson_offset(
-            coordinator.data.map.generated_mow_progress_geojson,
-            coordinator.map_offset_lat,
-            coordinator.map_offset_lon,
+            geojson, coordinator.map_offset_lat, coordinator.map_offset_lon
         )
 
     hass.services.async_register(
@@ -694,6 +752,22 @@ def async_setup_services(hass: HomeAssistant) -> None:  # noqa: C901
         else:
             await cast(MammotionSpinoCoordinator, coord).async_refresh_spino_tasks()
 
+    async def handle_get_tasks(call: ServiceCall) -> dict[str, Any]:
+        """Return the schedules the integration currently holds for a device."""
+        entity_id = call.data[ATTR_ENTITY_ID]
+        resolved = _resolve_device(hass, entity_id)
+        if resolved is None:
+            _raise_task_not_found(entity_id)
+            return {}
+        coord, kind = resolved
+        if kind == "mower":
+            plans = cast(MammotionReportUpdateCoordinator, coord).data.map.plan
+            tasks = [_mower_task_info(plan) for plan in plans.values()]
+        else:
+            pool_plans = cast(MammotionSpinoCoordinator, coord).data.plans
+            tasks = [_spino_task_info(plan) for plan in pool_plans.values()]
+        return cast(dict[str, Any], _stringify_large_ints({"tasks": tasks}))
+
     async def handle_start_task(call: ServiceCall) -> None:
         """Run a stored mower schedule immediately ("start task" / "start schedule").
 
@@ -740,4 +814,11 @@ def async_setup_services(hass: HomeAssistant) -> None:  # noqa: C901
     )
     hass.services.async_register(
         DOMAIN, SERVICE_START_TASK, handle_start_task, schema=START_TASK_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_TASKS,
+        handle_get_tasks,
+        schema=GET_TASKS_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
